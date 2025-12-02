@@ -1,0 +1,995 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// BTC STRATEGY (Indicator Version - Fixed)
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=6
+indicator("BTC Strategy", overlay=true, max_bars_back=5000)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 1: INPUT PARAMETERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 1.1 WEEKEND PROTECTION
+grp_weekend = "═══ WEEKEND LIQUIDITY PROTECTION ═══"
+i_weekendProtection = input.bool(true, "Enable Weekend Protection", group=grp_weekend)
+i_weekendReducePct = input.float(50.0, "Position Reduction %", minval=0, maxval=100, step=5, group=grp_weekend)
+i_fridayExitHour = input.int(20, "Friday Exit Hour (UTC)", minval=0, maxval=23, group=grp_weekend)
+i_sundayEntryHour = input.int(22, "Sunday Re-Entry Hour (UTC)", minval=0, maxval=23, group=grp_weekend)
+i_weekendVolThreshold = input.float(0.5, "Weekend Vol Multiplier Threshold", minval=0.1, maxval=2.0, step=0.1, group=grp_weekend)
+
+// 1.2 4-YEAR HALVING CYCLE
+grp_cycle = "═══ 4-YEAR HALVING CYCLE ═══"
+i_cycleEnabled = input.bool(true, "Enable Cycle Analysis", group=grp_cycle)
+i_halvingDate2024 = input.time(timestamp("2024-04-20"), "Last Halving Date", group=grp_cycle)
+i_cycleAccumulationEnd = input.int(180, "Accumulation Phase (Days Post-Halving)", group=grp_cycle)
+i_cycleBullEnd = input.int(540, "Bull Phase End (Days Post-Halving)", group=grp_cycle)
+i_cycleDistributionEnd = input.int(900, "Distribution Phase End (Days)", group=grp_cycle)
+i_cycleBias = input.float(1.5, "Cycle Bull Phase Position Multiplier", minval=0.5, maxval=3.0, group=grp_cycle)
+i_cycleBearBias = input.float(0.5, "Cycle Bear Phase Position Multiplier", minval=0.1, maxval=1.0, group=grp_cycle)
+
+// 1.3 CROSS-MARKET CORRELATION
+grp_markets = "═══ CROSS-MARKET SCREENING ═══"
+i_crossMarketEnabled = input.bool(true, "Enable Cross-Market Analysis", group=grp_markets)
+i_spxSymbol = input.symbol("OANDA:SPX500USD", "S&P 500 Symbol", group=grp_markets)
+i_daxSymbol = input.symbol("TVC:DEU40", "DAX Symbol", group=grp_markets) 
+i_hsiSymbol = input.symbol("TVC:HSI", "Hang Seng Symbol", group=grp_markets)
+i_dxySymbol = input.symbol("TVC:DXY", "Dollar Index", group=grp_markets)
+i_vixSymbol = input.symbol("TVC:VIX", "VIX Symbol", group=grp_markets)
+i_corrPeriod = input.int(50, "Correlation Period", minval=10, maxval=200, group=grp_markets)
+i_corrThreshold = input.float(0.6, "Correlation Threshold", minval=0.1, maxval=0.95, group=grp_markets)
+i_riskOffVIX = input.float(25.0, "VIX Risk-Off Threshold", group=grp_markets)
+i_riskOffDXY = input.float(2.0, "DXY Momentum Risk-Off", group=grp_markets)
+
+// 1.4 OPEN INTEREST
+grp_oi = "═══ OPEN INTEREST FLOW ═══"
+i_oiEnabled = input.bool(true, "Enable OI Analysis", group=grp_oi)
+i_oiSymbol = input.symbol("BINANCE:BTCUSDTPERP", "Perp Symbol for OI Proxy", group=grp_oi)
+i_oiPeriod = input.int(20, "OI Momentum Period", minval=5, maxval=100, group=grp_oi)
+i_oiDivergencePeriod = input.int(14, "OI Divergence Period", group=grp_oi)
+i_oiFlipSensitivity = input.float(1.5, "OI Flip Sensitivity (StdDev)", minval=0.5, maxval=3.0, group=grp_oi)
+
+// 1.5 SPOT FLOW
+grp_spot = "═══ SPOT FLOW ANALYSIS ═══"
+i_spotEnabled = input.bool(true, "Enable Spot Flow Analysis", group=grp_spot)
+i_volumeDeltaPeriod = input.int(20, "Volume Delta Period", group=grp_spot)
+i_cvdPeriod = input.int(50, "CVD Smoothing Period", group=grp_spot)
+i_largeOrderThreshold = input.float(2.0, "Large Order Threshold (StdDev)", group=grp_spot)
+i_absorptionPeriod = input.int(10, "Absorption Detection Period", group=grp_spot)
+
+// 1.6 TREASURY
+grp_treasury = "═══ TREASURY HOLDINGS PROXY ═══"
+i_treasuryEnabled = input.bool(true, "Enable Treasury Analysis", group=grp_treasury)
+i_mstrSymbol = input.symbol("NASDAQ:MSTR", "MicroStrategy Symbol", group=grp_treasury)
+i_coinSymbol = input.symbol("NASDAQ:COIN", "Coinbase Symbol", group=grp_treasury)
+i_grayscaleSymbol = input.symbol("AMEX:GBTC", "GBTC Symbol", group=grp_treasury)
+i_mstrCorrPeriod = input.int(30, "MSTR Correlation Period", group=grp_treasury)
+i_mstrLeadPeriod = input.int(5, "MSTR Lead/Lag Period", group=grp_treasury)
+
+// 1.7 ML ENGINE
+grp_ml = "═══ ML SIGNAL ENGINE ═══"
+i_mlEnabled = input.bool(true, "Enable ML Signal Engine", group=grp_ml)
+i_ensembleMethod = input.string("Weighted Average", "Ensemble Method", options=["Weighted Average", "Voting", "Stacking"], group=grp_ml)
+i_lookbackML = input.int(100, "ML Lookback Period", group=grp_ml)
+i_baseSignalThreshold = input.float(0.65, "Base Signal Threshold", minval=0.5, maxval=0.95, group=grp_ml)
+i_adaptiveWeights = input.bool(true, "Enable Adaptive Weighting", group=grp_ml)
+
+// 1.8 ★ KALMAN FILTER
+grp_kalman = "═══ ★ KALMAN FILTER ═══"
+i_kalmanEnabled = input.bool(true, "Enable Kalman Filter", group=grp_kalman)
+i_kalmanMeasurementNoise = input.float(0.1, "Measurement Noise (R)", minval=0.01, maxval=1.0, step=0.01, group=grp_kalman)
+i_kalmanProcessNoise = input.float(0.01, "Process Noise (Q)", minval=0.001, maxval=0.1, step=0.001, group=grp_kalman)
+i_kalmanAdaptive = input.bool(true, "Adaptive Noise Estimation", group=grp_kalman)
+
+// 1.9 ★ DYNAMIC THRESHOLDS
+grp_dynThresh = "═══ ★ DYNAMIC THRESHOLDS ═══"
+i_dynThreshEnabled = input.bool(true, "Enable Dynamic Thresholds", group=grp_dynThresh)
+i_dynThreshVolWeight = input.float(0.1, "Volatility Adjustment Weight", minval=0.01, maxval=0.3, step=0.01, group=grp_dynThresh)
+i_dynThreshQualityWeight = input.float(0.05, "Signal Quality Adjustment", minval=0.01, maxval=0.15, step=0.01, group=grp_dynThresh)
+i_dynThreshMinThreshold = input.float(0.55, "Minimum Threshold", minval=0.5, maxval=0.7, group=grp_dynThresh)
+i_dynThreshMaxThreshold = input.float(0.75, "Maximum Threshold", minval=0.65, maxval=0.9, group=grp_dynThresh)
+
+// 1.10 ★ INFORMATION COEFFICIENT
+grp_ic = "═══ ★ INFORMATION COEFFICIENT ═══"
+i_icEnabled = input.bool(true, "Enable IC Filtering", group=grp_ic)
+i_icPeriod = input.int(50, "IC Calculation Period", minval=20, maxval=200, group=grp_ic)
+i_icMinThreshold = input.float(0.05, "Minimum IC Threshold", minval=-0.1, maxval=0.3, step=0.01, group=grp_ic)
+i_icDecayFactor = input.float(0.95, "IC Decay Factor", minval=0.8, maxval=0.99, group=grp_ic)
+i_icHorizon1 = input.int(1, "IC Horizon 1 (bars)", minval=1, maxval=10, group=grp_ic)
+i_icHorizon2 = input.int(5, "IC Horizon 2 (bars)", minval=2, maxval=20, group=grp_ic)
+
+// 1.11 ★ CVaR
+grp_cvar = "═══ ★ CVaR RISK ENGINE ═══"
+i_cvarEnabled = input.bool(true, "Enable CVaR Position Sizing", group=grp_cvar)
+i_cvarConfidence = input.float(0.95, "CVaR Confidence Level", minval=0.9, maxval=0.99, step=0.01, group=grp_cvar)
+i_cvarPeriod = input.int(100, "CVaR Lookback Period", minval=50, maxval=500, group=grp_cvar)
+i_cvarMaxPosition = input.float(25.0, "CVaR Max Position %", minval=5, maxval=50, group=grp_cvar)
+i_cvarMinPosition = input.float(2.0, "CVaR Min Position %", minval=1, maxval=10, group=grp_cvar)
+i_cvarTargetRisk = input.float(2.0, "Target Daily Risk %", minval=0.5, maxval=5.0, step=0.1, group=grp_cvar)
+
+// 1.12 ★ LIQUIDATION CASCADE
+grp_liq = "═══ ★ LIQUIDATION CASCADE ═══"
+i_liqEnabled = input.bool(true, "Enable Liquidation Detection", group=grp_liq)
+i_liqVolSpikeMult = input.float(3.0, "Volume Spike Multiplier", minval=2.0, maxval=5.0, group=grp_liq)
+i_liqPriceMovePct = input.float(2.0, "Min Price Move %", minval=1.0, maxval=5.0, step=0.5, group=grp_liq)
+i_liqCooldownBars = input.int(5, "Cooldown Bars After Cascade", minval=1, maxval=20, group=grp_liq)
+i_liqLookback = input.int(20, "Liquidation Detection Period", minval=10, maxval=50, group=grp_liq)
+i_liqCascadeScore = input.float(0.7, "Cascade Score Threshold", minval=0.5, maxval=1.0, group=grp_liq)
+
+// 1.13 RISK MANAGEMENT
+grp_risk = "═══ RISK MANAGEMENT ═══"
+i_riskEnabled = input.bool(true, "Enable Dynamic Risk Management", group=grp_risk)
+i_maxDrawdown = input.float(15.0, "Max Drawdown % (Stop Trading)", minval=5, maxval=50, group=grp_risk)
+i_atrPeriod = input.int(14, "ATR Period", group=grp_risk)
+i_atrMultiplierSL = input.float(2.0, "ATR Multiplier for Stop Loss", minval=0.5, maxval=5.0, group=grp_risk)
+i_atrMultiplierTP = input.float(4.0, "ATR Multiplier for Take Profit", minval=1.0, maxval=10.0, group=grp_risk)
+i_trailingEnabled = input.bool(true, "Enable Trailing Stop", group=grp_risk)
+i_trailingATR = input.float(1.5, "Trailing Stop ATR Multiplier", group=grp_risk)
+i_maxPositionSize = input.float(30.0, "Max Position Size %", minval=5, maxval=100, group=grp_risk)
+i_kellyFraction = input.float(0.25, "Kelly Criterion Fraction", minval=0.1, maxval=0.5, group=grp_risk)
+
+// 1.14 REGIME DETECTION
+grp_regime = "═══ REGIME DETECTION ═══"
+i_regimeEnabled = input.bool(true, "Enable Regime Detection", group=grp_regime)
+i_regimePeriod = input.int(50, "Regime Detection Period", group=grp_regime)
+i_trendStrength = input.float(25.0, "ADX Trend Threshold", group=grp_regime)
+i_volRegimeMultiplier = input.float(1.5, "High Vol Regime Multiplier", group=grp_regime)
+i_meanRevPeriod = input.int(20, "Mean Reversion Period", group=grp_regime)
+
+// 1.15 TECHNICAL INDICATORS
+grp_tech = "═══ TECHNICAL ANALYSIS ═══"
+i_emaFast = input.int(21, "Fast EMA Period", group=grp_tech)
+i_emaSlow = input.int(55, "Slow EMA Period", group=grp_tech)
+i_ema200 = input.int(200, "Trend EMA Period", group=grp_tech)
+i_rsiPeriod = input.int(14, "RSI Period", group=grp_tech)
+i_rsiOB = input.float(70.0, "RSI Overbought", group=grp_tech)
+i_rsiOS = input.float(30.0, "RSI Oversold", group=grp_tech)
+i_macdFast = input.int(12, "MACD Fast", group=grp_tech)
+i_macdSlow = input.int(26, "MACD Slow", group=grp_tech)
+i_macdSignal = input.int(9, "MACD Signal", group=grp_tech)
+i_bbPeriod = input.int(20, "Bollinger Period", group=grp_tech)
+i_bbStdDev = input.float(2.0, "Bollinger StdDev", group=grp_tech)
+
+// 1.16 VISUALIZATION
+grp_viz = "═══ VISUALIZATION ═══"
+i_showDashboard = input.bool(true, "Show Analytics Dashboard", group=grp_viz)
+i_showSignals = input.bool(true, "Show Entry/Exit Signals", group=grp_viz)
+i_showRegime = input.bool(true, "Show Regime Background", group=grp_viz)
+i_showNewFeatures = input.bool(true, "Show New v4.0 Features", group=grp_viz)
+i_dashboardPosition = input.string("Top Right", "Dashboard Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grp_viz)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 2: HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Custom sum function (replaces ta.sum which doesn't exist)
+f_sum(src, len) =>
+    float result = 0.0
+    for i = 0 to len - 1
+        result += nz(src[i])
+    result
+
+f_zscore(src, len) =>
+    mean = ta.sma(src, len)
+    stdDev = ta.stdev(src, len)
+    stdDev == 0 ? 0.0 : (src - mean) / stdDev
+
+f_normalize(src, len) =>
+    minVal = ta.lowest(src, len)
+    maxVal = ta.highest(src, len)
+    range_val = maxVal - minVal
+    range_val == 0 ? 0.5 : (src - minVal) / range_val
+
+f_correlation(src1, src2, len) =>
+    ta.correlation(src1, src2, len)
+
+f_adaptiveMA(src, len) =>
+    change_abs = math.abs(ta.change(src, len))
+    sum_abs_change = f_sum(math.abs(ta.change(src)), len)
+    er = sum_abs_change == 0 ? 0.0 : change_abs / sum_abs_change
+    sc = math.pow(er * (2.0/(2+1) - 2.0/(len+1)) + 2.0/(len+1), 2)
+    var float kama = na
+    kama := na(kama) ? src : kama + sc * (src - kama)
+    kama
+
+// ★ KALMAN FILTER FUNCTION
+f_kalmanFilter(src, measurementNoise, processNoise, adaptive) =>
+    var float estimate = na
+    var float errorEstimate = 1.0
+    var float adaptiveR = measurementNoise
+    var float adaptiveQ = processNoise
+    
+    if na(estimate)
+        estimate := src
+    
+    // Pre-calculate stdev outside conditional for consistency
+    priceVol = ta.stdev(src, 10)
+    avgVol = ta.sma(priceVol, 50)
+    
+    if adaptive
+        innovation = src - estimate
+        innovationVar = ta.variance(innovation, 20)
+        adaptiveR := math.max(0.01, math.min(1.0, nz(innovationVar, measurementNoise)))
+        volRatio = avgVol == 0 ? 1.0 : priceVol / avgVol
+        adaptiveQ := processNoise * math.max(0.5, math.min(3.0, volRatio))
+    else
+        adaptiveR := measurementNoise
+        adaptiveQ := processNoise
+    
+    prediction = estimate
+    errorPrediction = errorEstimate + adaptiveQ
+    kalmanGain = errorPrediction / (errorPrediction + adaptiveR)
+    estimate := prediction + kalmanGain * (src - prediction)
+    errorEstimate := (1 - kalmanGain) * errorPrediction
+    
+    [estimate, kalmanGain, errorEstimate]
+
+// ★ DYNAMIC THRESHOLD FUNCTION
+f_dynamicThreshold(signal, vol, volSMA, baseThreshold, volWeight, qualityWeight, minThresh, maxThresh, len) =>
+    volNorm = volSMA == 0 ? 1.0 : vol / volSMA
+    volAdjust = (volNorm - 1.0) * volWeight
+    
+    signalStd = ta.stdev(signal, len)
+    signalMean = ta.sma(signal, len)
+    signalCV = math.abs(signalMean) == 0 ? 0.0 : signalStd / math.abs(signalMean)
+    qualityAdjust = math.min(signalCV * qualityWeight, qualityWeight)
+    
+    dynThreshold = baseThreshold + volAdjust - qualityAdjust
+    math.max(minThresh, math.min(maxThresh, dynThreshold))
+
+// ★ INFORMATION COEFFICIENT FUNCTION
+f_informationCoefficient(predictions, outcomes, len) =>
+    ta.correlation(predictions, outcomes, len)
+
+f_calculateIC(signal, horizon, period) =>
+    fwdReturn = close[horizon] == 0 ? 0.0 : (close - close[horizon]) / close[horizon]
+    laggedSignal = signal[horizon]
+    f_informationCoefficient(laggedSignal, fwdReturn, period)
+
+// ★ CVaR CALCULATION FUNCTION
+f_calculateCVaR(returns, confidence, len) =>
+    varLevel = ta.percentile_linear_interpolation(returns, len, (1 - confidence) * 100)
+    
+    var float sumBelowVaR = 0.0
+    var int countBelowVaR = 0
+    
+    sumBelowVaR := 0.0
+    countBelowVaR := 0
+    
+    for i = 0 to math.min(len - 1, 99)
+        if returns[i] < varLevel
+            sumBelowVaR += returns[i]
+            countBelowVaR += 1
+    
+    cvar = countBelowVaR > 0 ? sumBelowVaR / countBelowVaR : varLevel
+    [varLevel, cvar]
+
+f_cvarPositionSize(cvar, targetRisk, maxPos, minPos) =>
+    if cvar >= 0
+        minPos
+    else
+        rawSize = targetRisk / math.abs(cvar) * 100
+        math.max(minPos, math.min(maxPos, rawSize))
+
+// ★ LIQUIDATION CASCADE DETECTION
+f_detectLiquidationCascade(volSpikeMult, priceMovePct, lookback) =>
+    avgVol = ta.sma(volume, lookback)
+    volSpike = volume > avgVol * volSpikeMult
+    
+    priceMove = close[1] == 0 ? 0.0 : math.abs(close - close[1]) / close[1] * 100
+    largePriceMove = priceMove > priceMovePct
+    
+    cascadeDown = close < close[1]
+    cascadeUp = close > close[1]
+    
+    consecutiveCascadeBars = 0
+    for i = 0 to 2
+        priceMove_i = close[i+1] == 0 ? 0.0 : math.abs(close[i] - close[i+1]) / close[i+1] * 100
+        if volume[i] > avgVol * (volSpikeMult * 0.7) and priceMove_i > priceMovePct * 0.7
+            consecutiveCascadeBars += 1
+    
+    cascadeScore = 0.0
+    cascadeScore += volSpike ? 0.35 : 0.0
+    cascadeScore += largePriceMove ? 0.35 : 0.0
+    cascadeScore += consecutiveCascadeBars >= 2 ? 0.3 : (consecutiveCascadeBars == 1 ? 0.15 : 0.0)
+    
+    cascadeDirection = cascadeDown ? -1 : (cascadeUp ? 1 : 0)
+    [cascadeScore, cascadeDirection, volSpike and largePriceMove]
+
+// VOLATILITY FUNCTIONS
+f_historicalVol(src, len) =>
+    logReturns = src[1] == 0 ? 0.0 : math.log(src / src[1])
+    ta.stdev(logReturns, len) * math.sqrt(365) * 100
+
+// TIME FUNCTIONS
+f_isWeekend() =>
+    dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+
+f_isFridayEvening(exitHour) =>
+    dayofweek == dayofweek.friday and hour >= exitHour
+
+f_isSundayEvening(entryHour) =>
+    dayofweek == dayofweek.sunday and hour >= entryHour
+
+f_daysSinceHalving(halvingTime) =>
+    math.floor((time - halvingTime) / (24 * 60 * 60 * 1000))
+
+// MARKET MICROSTRUCTURE
+f_volumeDelta() =>
+    range_hl = high - low
+    buyVol = range_hl != 0 ? volume * (close - low) / range_hl : volume * 0.5
+    sellVol = range_hl != 0 ? volume * (high - close) / range_hl : volume * 0.5
+    buyVol - sellVol
+
+f_cvd(len) =>
+    delta = f_volumeDelta()
+    ta.cum(delta)
+
+f_orderFlowImbalance(len) =>
+    delta = f_volumeDelta()
+    bullBars = f_sum(delta > 0 ? delta : 0.0, len)
+    bearBars = f_sum(delta < 0 ? math.abs(delta) : 0.0, len)
+    total = bullBars + bearBars
+    total == 0 ? 0.0 : (bullBars - bearBars) / total
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 3: DATA RETRIEVAL
+// ══════════════════════════════════════════════════════════════════════════════
+
+[spxClose, spxHigh, spxLow, spxVolume] = request.security(i_spxSymbol, timeframe.period, [close, high, low, volume], barmerge.gaps_on, barmerge.lookahead_off)
+[daxClose, daxHigh, daxLow] = request.security(i_daxSymbol, timeframe.period, [close, high, low], barmerge.gaps_on, barmerge.lookahead_off)
+[hsiClose, hsiHigh, hsiLow] = request.security(i_hsiSymbol, timeframe.period, [close, high, low], barmerge.gaps_on, barmerge.lookahead_off)
+dxyClose = request.security(i_dxySymbol, timeframe.period, close, barmerge.gaps_on, barmerge.lookahead_off)
+vixClose = request.security(i_vixSymbol, timeframe.period, close, barmerge.gaps_on, barmerge.lookahead_off)
+
+[mstrClose, mstrVolume] = request.security(i_mstrSymbol, timeframe.period, [close, volume], barmerge.gaps_on, barmerge.lookahead_off)
+[coinClose, coinVolume] = request.security(i_coinSymbol, timeframe.period, [close, volume], barmerge.gaps_on, barmerge.lookahead_off)
+gbtcClose = request.security(i_grayscaleSymbol, timeframe.period, close, barmerge.gaps_on, barmerge.lookahead_off)
+
+[perpClose, perpVolume, perpOI] = request.security(i_oiSymbol, timeframe.period, [close, volume, open], barmerge.gaps_on, barmerge.lookahead_off)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4: MODULE CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 4.1 WEEKEND PROTECTION
+isWeekend = f_isWeekend()
+isFridayExit = f_isFridayEvening(i_fridayExitHour)
+isSundayEntry = f_isSundayEvening(i_sundayEntryHour)
+
+// Pre-calculate stdev values outside ternary operator for consistency
+weekdayVolCalc = ta.stdev(close, 5)
+weekendVolCalc = ta.stdev(close, 2)
+
+weekendVolRatio = isWeekend ? (weekdayVolCalc == 0 ? 1.0 : weekendVolCalc / weekdayVolCalc) : 1.0
+weekendRiskScore = isWeekend ? math.min(weekendVolRatio / i_weekendVolThreshold * 100, 100) : 0.0
+weekendProtectionActive = i_weekendProtection and (isWeekend or isFridayExit) and not isSundayEntry
+weekendPositionMult = weekendProtectionActive ? (100 - i_weekendReducePct) / 100 : 1.0
+
+// 4.2 4-YEAR CYCLE
+daysSinceHalving = f_daysSinceHalving(i_halvingDate2024)
+cycleDay = daysSinceHalving % 1460
+
+cyclePhase = cycleDay <= i_cycleAccumulationEnd ? 1 : cycleDay <= i_cycleBullEnd ? 2 : cycleDay <= i_cycleDistributionEnd ? 3 : 4
+
+cyclePhaseStr = cyclePhase == 1 ? "ACCUMULATION" : cyclePhase == 2 ? "BULL MARKET" : cyclePhase == 3 ? "DISTRIBUTION" : "BEAR MARKET"
+
+cyclePositionMult = i_cycleEnabled ? (cyclePhase == 1 ? 1.0 : cyclePhase == 2 ? i_cycleBias : cyclePhase == 3 ? 0.75 : i_cycleBearBias) : 1.0
+
+// 4.3 CROSS-MARKET CORRELATION
+btcReturns = ta.roc(close, 1)
+spxReturns = ta.roc(nz(spxClose, close), 1)
+daxReturns = ta.roc(nz(daxClose, close), 1)
+hsiReturns = ta.roc(nz(hsiClose, close), 1)
+dxyReturns = ta.roc(nz(dxyClose, 100), 1)
+
+corrSPX = f_correlation(btcReturns, spxReturns, i_corrPeriod)
+corrDAX = f_correlation(btcReturns, daxReturns, i_corrPeriod)
+corrHSI = f_correlation(btcReturns, hsiReturns, i_corrPeriod)
+corrDXY = f_correlation(btcReturns, dxyReturns, i_corrPeriod)
+
+spxAboveMA = nz(spxClose, 0) > ta.sma(nz(spxClose, close), 50)
+daxAboveMA = nz(daxClose, 0) > ta.sma(nz(daxClose, close), 50)
+hsiAboveMA = nz(hsiClose, 0) > ta.sma(nz(hsiClose, close), 50)
+
+marketBreadth = (spxAboveMA ? 1 : 0) + (daxAboveMA ? 1 : 0) + (hsiAboveMA ? 1 : 0)
+marketBreadthScore = marketBreadth / 3.0 * 100
+
+vixLevel = nz(vixClose, 20)
+dxyMomentum = ta.roc(nz(dxyClose, 100), 10)
+riskOffSignal = vixLevel > i_riskOffVIX or dxyMomentum > i_riskOffDXY
+
+crossMarketScore = i_crossMarketEnabled ? (f_normalize(corrSPX, i_corrPeriod) * 0.3 + f_normalize(marketBreadthScore, i_corrPeriod) * 0.3 + (1 - f_normalize(vixLevel, i_corrPeriod)) * 0.2 + (1 - f_normalize(dxyMomentum, i_corrPeriod)) * 0.2) : 0.5
+
+// 4.4 OPEN INTEREST ANALYSIS
+oiProxy = ta.sma(perpVolume, i_oiPeriod)
+oiChange = ta.change(oiProxy)
+oiMomentum = ta.roc(oiProxy, i_oiPeriod)
+oiZscore = f_zscore(oiProxy, i_oiPeriod * 2)
+
+oiFlipBullish = ta.crossover(oiZscore, i_oiFlipSensitivity) and close > close[1]
+oiFlipBearish = ta.crossunder(oiZscore, -i_oiFlipSensitivity) and close < close[1]
+
+priceUp = close > close[i_oiDivergencePeriod]
+oiUp = oiProxy > oiProxy[i_oiDivergencePeriod]
+oiBullishDiv = not priceUp and oiUp
+oiBearishDiv = priceUp and not oiUp
+
+longBias = f_volumeDelta() > 0
+longBiasSum = f_sum(longBias ? volume : 0.0, i_oiPeriod)
+shortBiasSum = f_sum(not longBias ? volume : 0.0, i_oiPeriod)
+longShortRatioProxy = shortBiasSum == 0 ? 1.0 : longBiasSum / shortBiasSum
+
+oiScore = i_oiEnabled ? f_normalize(oiMomentum, i_oiPeriod * 2) * 0.4 + (oiFlipBullish ? 0.3 : oiFlipBearish ? -0.3 : 0.0) + (oiBullishDiv ? 0.15 : oiBearishDiv ? -0.15 : 0.0) + f_normalize(longShortRatioProxy, i_oiPeriod) * 0.15 : 0.5
+
+// 4.5 SPOT VOLUME ANALYSIS
+volumeDelta = f_volumeDelta()
+volumeDeltaSMA = ta.sma(volumeDelta, i_volumeDeltaPeriod)
+volumeDeltaStdDev = ta.stdev(volumeDelta, i_volumeDeltaPeriod)
+
+cvd = f_cvd(i_cvdPeriod)
+cvdSMA = ta.sma(cvd, i_cvdPeriod)
+cvdTrend = cvd > cvdSMA
+
+largeOrderThreshold = volumeDeltaStdDev * i_largeOrderThreshold
+largeBuyOrder = volumeDelta > largeOrderThreshold
+largeSellOrder = volumeDelta < -largeOrderThreshold
+
+absorption = ta.highest(volume, i_absorptionPeriod) == volume and math.abs(close - open) < math.abs(close[1] - open[1])
+buyAbsorption = absorption and close < open and volumeDelta > 0
+sellAbsorption = absorption and close > open and volumeDelta < 0
+
+orderFlowImbalance = f_orderFlowImbalance(i_volumeDeltaPeriod)
+
+vwapValue = ta.vwap(hlc3)
+vwapDev = close - vwapValue
+vwapZscore = f_zscore(vwapDev, i_volumeDeltaPeriod)
+
+spotScore = i_spotEnabled ? f_normalize(orderFlowImbalance, i_volumeDeltaPeriod) * 0.35 + (cvdTrend ? 0.25 : -0.25) + f_normalize(-vwapZscore, i_volumeDeltaPeriod) * 0.2 + (largeBuyOrder ? 0.1 : largeSellOrder ? -0.1 : 0.0) + (buyAbsorption ? 0.1 : sellAbsorption ? -0.1 : 0.0) : 0.5
+
+// 4.6 TREASURY ANALYSIS
+mstrReturns = ta.roc(nz(mstrClose, close), 1)
+mstrBTCCorr = f_correlation(mstrReturns, btcReturns, i_mstrCorrPeriod)
+mstrMomentum = ta.roc(nz(mstrClose, close), 20)
+
+// Pre-calculate stdev values for consistency
+mstrStdev = ta.stdev(mstrReturns, 20)
+btcStdev = ta.stdev(btcReturns, 20)
+mstrVolRatio = btcStdev == 0 ? 1.0 : mstrStdev / btcStdev
+
+mstrLeadSignal = ta.crossover(ta.ema(nz(mstrClose, close), 10), ta.ema(nz(mstrClose, close), 20))
+coinMomentum = ta.roc(nz(coinClose, close), 20)
+coinVolume20 = ta.sma(nz(coinVolume, volume), 20)
+coinVolumeSpike = nz(coinVolume, volume) > coinVolume20 * 1.5
+
+gbtcMomentum = ta.roc(nz(gbtcClose, close), 10)
+
+treasuryScore = i_treasuryEnabled ? f_normalize(mstrMomentum, 50) * 0.35 + f_normalize(coinMomentum, 50) * 0.25 + f_normalize(gbtcMomentum, 50) * 0.2 + (mstrLeadSignal ? 0.1 : 0.0) + (coinVolumeSpike ? 0.1 : 0.0) : 0.5
+
+// 4.7 REGIME DETECTION
+[diPlus, diMinus, adxValue] = ta.dmi(14, 14)
+trendStrength = adxValue
+isTrending = adxValue > i_trendStrength
+trendDirection = diPlus > diMinus ? 1 : -1
+
+hvol = f_historicalVol(close, i_regimePeriod)
+hvolSMA = ta.sma(hvol, i_regimePeriod * 2)
+highVolRegime = hvol > hvolSMA * i_volRegimeMultiplier
+lowVolRegime = hvol < hvolSMA / i_volRegimeMultiplier
+
+meanPrice = ta.sma(close, i_meanRevPeriod)
+meanDeviation = meanPrice == 0 ? 0.0 : (close - meanPrice) / meanPrice * 100
+isMeanReverting = not isTrending and math.abs(meanDeviation) > 5
+
+regime = isTrending and trendDirection == 1 ? 1 : isTrending and trendDirection == -1 ? 2 : isMeanReverting and meanDeviation > 0 ? 3 : isMeanReverting and meanDeviation < 0 ? 4 : 5
+
+regimeStr = regime == 1 ? "BULL TREND" : regime == 2 ? "BEAR TREND" : regime == 3 ? "MEAN REV HIGH" : regime == 4 ? "MEAN REV LOW" : "RANGING"
+
+// 4.8 TECHNICAL INDICATORS
+emaFast = ta.ema(close, i_emaFast)
+emaSlow = ta.ema(close, i_emaSlow)
+ema200 = ta.ema(close, i_ema200)
+kamaValue = f_adaptiveMA(close, i_emaSlow)
+
+rsiValue = ta.rsi(close, i_rsiPeriod)
+rsiMA = ta.sma(rsiValue, 14)
+rsiBullish = rsiValue > rsiMA and rsiValue > 50
+rsiBearish = rsiValue < rsiMA and rsiValue < 50
+
+[macdLine, signalLine, histLine] = ta.macd(close, i_macdFast, i_macdSlow, i_macdSignal)
+macdBullish = macdLine > signalLine and histLine > histLine[1]
+macdBearish = macdLine < signalLine and histLine < histLine[1]
+
+[bbUpper, bbMiddle, bbLower] = ta.bb(close, i_bbPeriod, i_bbStdDev)
+bbWidth = bbMiddle == 0 ? 0.0 : (bbUpper - bbLower) / bbMiddle * 100
+bbSqueeze = bbWidth < ta.sma(bbWidth, 50) * 0.75
+bbBreakoutUp = close > bbUpper
+bbBreakoutDown = close < bbLower
+
+stochRSIK = ta.stoch(rsiValue, rsiValue, rsiValue, 14)
+stochRSID = ta.sma(stochRSIK, 3)
+stochOversold = stochRSIK < 20 and stochRSID < 20
+stochOverbought = stochRSIK > 80 and stochRSID > 80
+
+atrValue = ta.atr(i_atrPeriod)
+atrNormalized = close == 0 ? 0.0 : atrValue / close * 100
+
+tenkan = (ta.highest(high, 9) + ta.lowest(low, 9)) / 2
+kijun = (ta.highest(high, 26) + ta.lowest(low, 26)) / 2
+senkouA = (tenkan + kijun) / 2
+senkouB = (ta.highest(high, 52) + ta.lowest(low, 52)) / 2
+ichimokuBullish = close > senkouA and close > senkouB and tenkan > kijun
+ichimokuBearish = close < senkouA and close < senkouB and tenkan < kijun
+
+techScore = (emaFast > emaSlow ? 0.15 : -0.15) + (close > ema200 ? 0.1 : -0.1) + (rsiBullish ? 0.1 : rsiBearish ? -0.1 : 0.0) + (macdBullish ? 0.15 : macdBearish ? -0.15 : 0.0) + f_normalize(100 - rsiValue, 100) * 0.1 + (ichimokuBullish ? 0.1 : ichimokuBearish ? -0.1 : 0.0) + (bbSqueeze ? 0.05 : 0.0) + (stochOversold ? 0.1 : stochOverbought ? -0.1 : 0.0) + f_normalize(-meanDeviation, 20) * 0.15
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 5: ★ MODULE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 5.1 ★ LIQUIDATION CASCADE DETECTION
+[cascadeScore, cascadeDirection, cascadeActive] = f_detectLiquidationCascade(i_liqVolSpikeMult, i_liqPriceMovePct, i_liqLookback)
+
+var int cascadeCooldown = 0
+if cascadeActive and cascadeScore >= i_liqCascadeScore
+    cascadeCooldown := i_liqCooldownBars
+
+if cascadeCooldown > 0
+    cascadeCooldown -= 1
+
+liquidationFilter = i_liqEnabled ? (cascadeScore < i_liqCascadeScore and cascadeCooldown == 0) : true
+liquidationWarning = cascadeScore >= i_liqCascadeScore or cascadeCooldown > 0
+
+// 5.2 ★ CVaR CALCULATION
+dailyReturns = ta.roc(close, 1) / 100
+[varLevel, cvarLevel] = f_calculateCVaR(dailyReturns, i_cvarConfidence, i_cvarPeriod)
+
+cvarPositionSize = i_cvarEnabled ? f_cvarPositionSize(cvarLevel, i_cvarTargetRisk / 100, i_cvarMaxPosition, i_cvarMinPosition) : 10.0
+
+// 5.3 ML SIGNAL ENGINE
+feat_momentum1 = ta.roc(close, 5)
+feat_momentum2 = ta.roc(close, 10)
+feat_momentum3 = ta.roc(close, 20)
+feat_momentumComposite = (feat_momentum1 + feat_momentum2 * 2 + feat_momentum3 * 3) / 6
+
+feat_vol1 = f_historicalVol(close, 10)
+feat_vol2 = f_historicalVol(close, 30)
+feat_volRatio = feat_vol2 == 0 ? 1.0 : feat_vol1 / feat_vol2
+
+feat_meanRev1 = f_zscore(close, 20)
+feat_meanRev2 = f_zscore(close, 50)
+feat_bbPosition = (bbUpper - bbLower) == 0 ? 0.5 : (close - bbLower) / (bbUpper - bbLower)
+
+feat_trendStrength = adxValue / 100
+feat_trendDirection = diPlus > diMinus ? 1 : -1
+feat_emaSlope = emaFast[5] == 0 ? 0.0 : (emaFast - emaFast[5]) / emaFast[5] * 100
+
+// [FIX] Calculate SMA outside of ternary for consistency
+volSMA20 = ta.sma(volume, 20)
+feat_volumeRatio = volSMA20 == 0 ? 1.0 : volume / volSMA20
+feat_volumeTrend = ta.roc(ta.sma(volume, 10), 10)
+
+feat_corrComposite = (nz(corrSPX, 0) + nz(corrDAX, 0) + nz(corrHSI, 0)) / 3
+feat_riskSentiment = riskOffSignal ? -1 : 1
+
+feat_orderFlow = orderFlowImbalance
+feat_cvdTrend = ta.roc(cvd, 10)
+
+// Adaptive weights
+var float[] recentReturns = array.new_float(100, 0)
+currentReturn = ta.roc(close, 1)
+array.push(recentReturns, currentReturn)
+if array.size(recentReturns) > 100
+    array.shift(recentReturns)
+
+avgReturn = array.avg(recentReturns)
+returnStdDev = array.stdev(recentReturns)
+
+w_momentum = isTrending ? 0.25 : 0.1
+w_meanRev = isMeanReverting ? 0.25 : 0.1
+w_volume = highVolRegime ? 0.2 : 0.15
+w_crossMarket = math.abs(nz(corrSPX, 0)) > i_corrThreshold ? 0.2 : 0.1
+w_technical = 0.15
+w_cycle = i_cycleEnabled ? 0.1 : 0.0
+w_oi = i_oiEnabled ? 0.15 : 0.0
+w_spot = i_spotEnabled ? 0.1 : 0.0
+w_treasury = i_treasuryEnabled ? 0.05 : 0.0
+
+totalWeight = w_momentum + w_meanRev + w_volume + w_crossMarket + w_technical + w_cycle + w_oi + w_spot + w_treasury
+w_momentum := w_momentum / totalWeight
+w_meanRev := w_meanRev / totalWeight
+w_volume := w_volume / totalWeight
+w_crossMarket := w_crossMarket / totalWeight
+w_technical := w_technical / totalWeight
+w_cycle := w_cycle / totalWeight
+w_oi := w_oi / totalWeight
+w_spot := w_spot / totalWeight
+w_treasury := w_treasury / totalWeight
+
+norm_momentum = f_normalize(feat_momentumComposite, i_lookbackML)
+norm_meanRev = 1 - f_normalize(math.abs(feat_meanRev1), i_lookbackML)
+norm_volume = f_normalize(feat_volumeRatio, i_lookbackML)
+norm_crossMarket = crossMarketScore
+norm_technical = (techScore + 1) / 2
+norm_cycle = cyclePhase <= 2 ? 0.7 : 0.3
+norm_oi = oiScore
+norm_spot = (spotScore + 1) / 2
+norm_treasury = treasuryScore
+
+var float mlSignalRaw = 0.5
+
+if i_ensembleMethod == "Weighted Average"
+    mlSignalRaw := norm_momentum * w_momentum + norm_meanRev * w_meanRev + norm_volume * w_volume + norm_crossMarket * w_crossMarket + norm_technical * w_technical + norm_cycle * w_cycle + norm_oi * w_oi + norm_spot * w_spot + norm_treasury * w_treasury
+
+else if i_ensembleMethod == "Voting"
+    votes = 0
+    votes += norm_momentum > 0.5 ? 1 : -1
+    votes += norm_meanRev > 0.5 ? 1 : -1
+    votes += norm_crossMarket > 0.5 ? 1 : -1
+    votes += norm_technical > 0.5 ? 1 : -1
+    votes += norm_oi > 0.5 ? 1 : -1
+    votes += norm_spot > 0.5 ? 1 : -1
+    mlSignalRaw := (votes + 6) / 12.0
+
+else
+    layer1_trend = (norm_momentum + norm_technical) / 2
+    layer1_flow = (norm_oi + norm_spot + norm_volume) / 3
+    layer1_macro = (norm_crossMarket + norm_cycle + norm_treasury) / 3
+    mlSignalRaw := layer1_trend * 0.4 + layer1_flow * 0.35 + layer1_macro * 0.25
+
+// 5.4 ★ KALMAN FILTER SMOOTHING
+[mlSignalKalman, kalmanGain, kalmanError] = f_kalmanFilter(mlSignalRaw, i_kalmanMeasurementNoise, i_kalmanProcessNoise, i_kalmanAdaptive)
+
+mlSignalSmooth = i_kalmanEnabled ? mlSignalKalman : ta.ema(mlSignalRaw, 5)
+signalStrength = math.abs(mlSignalSmooth - 0.5) * 2
+
+// 5.5 ★ INFORMATION COEFFICIENT TRACKING
+ic1 = f_calculateIC(mlSignalSmooth, i_icHorizon1, i_icPeriod)
+ic2 = f_calculateIC(mlSignalSmooth, i_icHorizon2, i_icPeriod)
+
+icComposite = (nz(ic1, 0) + nz(ic2, 0)) / 2
+
+var float icEMA = 0.0
+icEMA := i_icDecayFactor * icEMA + (1 - i_icDecayFactor) * icComposite
+
+icQuality = icEMA > 0.1 ? "EXCELLENT" : icEMA > i_icMinThreshold ? "GOOD" : icEMA > 0 ? "MARGINAL" : "POOR"
+
+icFilterPassed = i_icEnabled ? icEMA >= i_icMinThreshold : true
+
+// 5.6 ★ DYNAMIC THRESHOLDS
+dynamicUpperThreshold = i_dynThreshEnabled ? f_dynamicThreshold(mlSignalSmooth, hvol, hvolSMA, i_baseSignalThreshold, i_dynThreshVolWeight, i_dynThreshQualityWeight, i_dynThreshMinThreshold, i_dynThreshMaxThreshold, i_lookbackML) : i_baseSignalThreshold
+
+dynamicLowerThreshold = i_dynThreshEnabled ? f_dynamicThreshold(mlSignalSmooth, hvol, hvolSMA, 1 - i_baseSignalThreshold, -i_dynThreshVolWeight, i_dynThreshQualityWeight, 1 - i_dynThreshMaxThreshold, 1 - i_dynThreshMinThreshold, i_lookbackML) : 1 - i_baseSignalThreshold
+
+// 5.7 CONFIDENCE CALCULATION
+baseConfidence = signalStrength * (1 - returnStdDev / 10)
+icBoost = icEMA > 0.1 ? 0.1 : (icEMA > 0.05 ? 0.05 : 0.0)
+confidence = math.min(1.0, baseConfidence + icBoost)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6: TRADE SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+bullishSignal = mlSignalSmooth > dynamicUpperThreshold and confidence > 0.3 and not riskOffSignal and not weekendProtectionActive
+
+bearishSignal = mlSignalSmooth < dynamicLowerThreshold and confidence > 0.3 and not weekendProtectionActive
+
+allFiltersPass = liquidationFilter and icFilterPassed
+
+bullConfirm = bullishSignal and allFiltersPass and (emaFast > emaSlow or regime == 4) and (cyclePhase <= 2 or not i_cycleEnabled)
+
+bearConfirm = bearishSignal and allFiltersPass and (emaFast < emaSlow or regime == 3) and (cyclePhase >= 3 or not i_cycleEnabled)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7: RISK MANAGEMENT & POSITION SIZING (SIMULATION)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- PAPER TRADING SIMULATION ENGINE (NEW FOR INDICATOR) ---
+// Initialize variables using the `var` keyword so they persist across bars
+var float sim_equity = 100000.0  // Simulated Equity
+var float sim_peak_equity = 100000.0 // Peak Equity tracking
+var float sim_entry_price = 0.0 // Entry Price
+var int sim_pos_state = 0       // 0=Flat, 1=Long, -1=Short
+var int sim_wins = 0            // Win Counter
+var int sim_losses = 0          // Loss Counter
+var float sim_gross_profit = 0.0
+var float sim_gross_loss = 0.0
+
+// ATR Logic from original code
+stopLossDistance = atrValue * i_atrMultiplierSL
+takeProfitDistance = atrValue * i_atrMultiplierTP
+
+// EXIT LOGIC FIRST (Check if previous trade closed on this bar)
+// Logic: If in position, check against High/Low for TP/SL or Close for Signal Exit
+bool sim_exit_long = false
+bool sim_exit_short = false
+
+if sim_pos_state == 1 // Currently Long
+    // Check Stop Loss
+    if low <= (sim_entry_price - stopLossDistance)
+        sim_losses := sim_losses + 1
+        loss_amt = math.abs(stopLossDistance) * 10 
+        sim_gross_loss := sim_gross_loss + loss_amt
+        sim_equity := sim_equity - loss_amt
+        sim_pos_state := 0
+        sim_exit_long := true
+    // Check Take Profit
+    else if high >= (sim_entry_price + takeProfitDistance)
+        sim_wins := sim_wins + 1
+        win_amt = takeProfitDistance * 10
+        sim_gross_profit := sim_gross_profit + win_amt
+        sim_equity := sim_equity + win_amt
+        sim_pos_state := 0
+        sim_exit_long := true
+    // Check Signal Exit (bearishSignal or RiskOff)
+    else if bearishSignal or riskOffSignal or liquidationWarning
+        pnl = close - sim_entry_price
+        if pnl > 0
+            sim_wins := sim_wins + 1
+            sim_gross_profit := sim_gross_profit + (pnl * 10)
+            sim_equity := sim_equity + (pnl * 10)
+        else
+            sim_losses := sim_losses + 1
+            sim_gross_loss := sim_gross_loss + (math.abs(pnl) * 10)
+            sim_equity := sim_equity - (math.abs(pnl) * 10)
+        sim_pos_state := 0
+        sim_exit_long := true
+
+if sim_pos_state == -1 // Currently Short
+    // Check Stop Loss
+    if high >= (sim_entry_price + stopLossDistance)
+        sim_losses := sim_losses + 1
+        loss_amt = math.abs(stopLossDistance) * 10
+        sim_gross_loss := sim_gross_loss + loss_amt
+        sim_equity := sim_equity - loss_amt
+        sim_pos_state := 0
+        sim_exit_short := true
+    // Check Take Profit
+    else if low <= (sim_entry_price - takeProfitDistance)
+        sim_wins := sim_wins + 1
+        win_amt = takeProfitDistance * 10
+        sim_gross_profit := sim_gross_profit + win_amt
+        sim_equity := sim_equity + win_amt
+        sim_pos_state := 0
+        sim_exit_short := true
+    // Check Signal Exit
+    else if bullishSignal or liquidationWarning
+        pnl = sim_entry_price - close
+        if pnl > 0
+            sim_wins := sim_wins + 1
+            sim_gross_profit := sim_gross_profit + (pnl * 10)
+            sim_equity := sim_equity + (pnl * 10)
+        else
+            sim_losses := sim_losses + 1
+            sim_gross_loss := sim_gross_loss + (math.abs(pnl) * 10)
+            sim_equity := sim_equity - (math.abs(pnl) * 10)
+        sim_pos_state := 0
+        sim_exit_short := true
+
+// UPDATE DRAWDOWN STATS
+if sim_equity > sim_peak_equity
+    sim_peak_equity := sim_equity
+
+currentDrawdown = sim_peak_equity == 0 ? 0.0 : (sim_peak_equity - sim_equity) / sim_peak_equity * 100
+maxDrawdownBreached = currentDrawdown >= i_maxDrawdown
+
+// CALCULATE POSITION SIZING (Using simulated stats)
+// Win Rate for Kelly
+total_trades = sim_wins + sim_losses
+sim_winrate = total_trades > 0 ? sim_wins / total_trades : 0.0
+// Profit Factor
+sim_pf = sim_gross_loss > 0 ? sim_gross_profit / sim_gross_loss : 0.0
+// Avg Win/Loss for Kelly
+sim_avg_win = sim_wins > 0 ? sim_gross_profit / sim_wins : 0.0
+sim_avg_loss = sim_losses > 0 ? sim_gross_loss / sim_losses : 1.0 // Avoid div by zero
+payoffRatio = sim_avg_win / math.max(sim_avg_loss, 1.0)
+
+kellyPercent = sim_winrate - ((1 - sim_winrate) / payoffRatio)
+kellyPosition = math.max(0, math.min(kellyPercent * i_kellyFraction * 100, i_maxPositionSize))
+
+// Base Position Calculation logic restored from Strategy
+basePosition = i_riskEnabled ? kellyPosition * (hvol == 0 ? 1.0 : math.max(0.5, math.min(2.0, hvolSMA / hvol))) : 10.0
+cvarAdjustedPosition = i_cvarEnabled ? math.min(basePosition, cvarPositionSize) : basePosition
+adjustedPosition = cvarAdjustedPosition * cyclePositionMult * weekendPositionMult
+
+icPositionMult = icEMA > 0.1 ? 1.2 : (icEMA > 0.05 ? 1.0 : 0.8)
+adjustedPosition := adjustedPosition * icPositionMult
+
+finalPosition = math.min(adjustedPosition, i_maxPositionSize)
+
+// ENTRY LOGIC (Check for new trades if flat)
+bool sim_new_long = false
+bool sim_new_short = false
+
+// Use "bullConfirm" and "bearConfirm" from Section 6
+// IMPORTANT: Only enter if currently flat (sim_pos_state == 0)
+if sim_pos_state == 0
+    if bullConfirm and not maxDrawdownBreached
+        sim_pos_state := 1
+        sim_entry_price := close
+        sim_new_long := true
+    
+    if bearConfirm and not maxDrawdownBreached
+        sim_pos_state := -1
+        sim_entry_price := close
+        sim_new_short := true
+
+// Map variables to old names for compatibility with plotting code below
+longCondition = sim_new_long
+shortCondition = sim_new_short
+exitLongCondition = sim_exit_long
+exitShortCondition = sim_exit_short
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 9: VISUALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(emaFast, "EMA Fast", color=color.new(color.blue, 0), linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=1)
+plot(ema200, "EMA 200", color=color.new(color.purple, 0), linewidth=2)
+plot(vwapValue, "VWAP", color=color.new(color.yellow, 50), linewidth=1, style=plot.style_circles)
+
+p_bbUpper = plot(bbUpper, "BB Upper", color=color.new(color.gray, 70))
+p_bbLower = plot(bbLower, "BB Lower", color=color.new(color.gray, 70))
+fill(p_bbUpper, p_bbLower, color=color.new(color.blue, 95))
+
+plotshape(i_showSignals and longCondition, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.normal)
+plotshape(i_showSignals and shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.normal)
+plotshape(i_showSignals and exitLongCondition, "Exit Long", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.small)
+plotshape(i_showSignals and exitShortCondition, "Exit Short", shape.xcross, location.belowbar, color.new(color.orange, 0), size=size.small)
+
+plotshape(oiFlipBullish, "OI Flip Bullish", shape.circle, location.belowbar, color.new(color.lime, 30), size=size.tiny)
+plotshape(oiFlipBearish, "OI Flip Bearish", shape.circle, location.abovebar, color.new(color.fuchsia, 30), size=size.tiny)
+
+plotshape(i_showNewFeatures and liquidationWarning, "Liquidation Warning", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.tiny, text="LIQ", textcolor=color.white)
+
+regimeColor = regime == 1 ? color.new(color.green, 90) :
+              regime == 2 ? color.new(color.red, 90) :
+              regime == 3 ? color.new(color.orange, 90) :
+              regime == 4 ? color.new(color.teal, 90) :
+              color.new(color.gray, 95)
+
+bgcolor(i_showRegime ? regimeColor : na, title="Regime Background")
+bgcolor(weekendProtectionActive ? color.new(color.yellow, 85) : na, title="Weekend Warning")
+bgcolor(liquidationWarning ? color.new(color.red, 90) : na, title="Liquidation Warning BG")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 10: ANALYTICS DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════════
+
+// [FIX] Define dashboard position logic outside table.new to prevent syntax errors
+dashPos = i_dashboardPosition == "Top Right" ? position.top_right : i_dashboardPosition == "Top Left" ? position.top_left : i_dashboardPosition == "Bottom Right" ? position.bottom_right : position.bottom_left
+
+var table dashboard = table.new(dashPos, 4, 24, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+
+if i_showDashboard and barstate.islast
+    table.cell(dashboard, 0, 0, "BTC Strategy", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 30), text_halign=text.align_center)
+    table.merge_cells(dashboard, 0, 0, 3, 0)
+    
+    table.cell(dashboard, 0, 1, "═══ ★ FEATURES ═══", text_color=color.lime, text_size=size.small, bgcolor=color.new(color.green, 70))
+    table.merge_cells(dashboard, 0, 1, 3, 1)
+    
+    kalmanStatus = i_kalmanEnabled ? "ON" : "OFF"
+    table.cell(dashboard, 0, 2, "Kalman Filter:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 2, kalmanStatus, text_color=i_kalmanEnabled ? color.green : color.gray, text_size=size.tiny)
+    table.cell(dashboard, 2, 2, "Gain:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 2, str.tostring(kalmanGain, "#.###"), text_color=color.aqua, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 3, "Dyn Thresh:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 3, str.tostring(dynamicUpperThreshold, "#.##") + "/" + str.tostring(dynamicLowerThreshold, "#.##"), text_color=color.yellow, text_size=size.tiny)
+    table.cell(dashboard, 2, 3, "Base:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 3, str.tostring(i_baseSignalThreshold, "#.##"), text_color=color.gray, text_size=size.tiny)
+    
+    icColor = icEMA > 0.1 ? color.green : icEMA > 0.05 ? color.yellow : icEMA > 0 ? color.orange : color.red
+    table.cell(dashboard, 0, 4, "IC Score:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 4, str.tostring(icEMA, "#.###"), text_color=icColor, text_size=size.tiny)
+    table.cell(dashboard, 2, 4, "Quality:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 4, icQuality, text_color=icColor, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 5, "CVaR (95%):", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 5, str.tostring(cvarLevel * 100, "#.##") + "%", text_color=cvarLevel < -0.02 ? color.red : color.green, text_size=size.tiny)
+    table.cell(dashboard, 2, 5, "CVaR Pos:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 5, str.tostring(cvarPositionSize, "#.#") + "%", text_color=color.aqua, text_size=size.tiny)
+    
+    liqColor = liquidationWarning ? color.red : color.green
+    table.cell(dashboard, 0, 6, "Liq Cascade:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 6, str.tostring(cascadeScore, "#.##"), text_color=liqColor, text_size=size.tiny)
+    table.cell(dashboard, 2, 6, "Status:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 6, liquidationWarning ? "WARNING" : "CLEAR", text_color=liqColor, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 7, "═══ ML SIGNAL ENGINE ═══", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dashboard, 0, 7, 3, 7)
+    
+    signalColor = mlSignalSmooth > dynamicUpperThreshold ? color.green : mlSignalSmooth < dynamicLowerThreshold ? color.red : color.yellow
+    table.cell(dashboard, 0, 8, "ML Signal:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 8, str.tostring(mlSignalSmooth, "#.###"), text_color=signalColor, text_size=size.small)
+    table.cell(dashboard, 2, 8, "Confidence:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 8, str.tostring(confidence * 100, "#.#") + "%", text_color=color.white, text_size=size.small)
+    
+    table.cell(dashboard, 0, 9, "Momentum:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 9, str.tostring(norm_momentum, "#.##"), text_color=norm_momentum > 0.5 ? color.green : color.red, text_size=size.tiny)
+    table.cell(dashboard, 2, 9, "Technical:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 3, 9, str.tostring(norm_technical, "#.##"), text_color=norm_technical > 0.5 ? color.green : color.red, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 10, "OI Score:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 10, str.tostring(norm_oi, "#.##"), text_color=norm_oi > 0.5 ? color.green : color.red, text_size=size.tiny)
+    table.cell(dashboard, 2, 10, "Spot Flow:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 3, 10, str.tostring(norm_spot, "#.##"), text_color=norm_spot > 0.5 ? color.green : color.red, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 11, "═══ MARKET CONTEXT ═══", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dashboard, 0, 11, 3, 11)
+    
+    table.cell(dashboard, 0, 12, "Regime:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 12, regimeStr, text_color=regime <= 2 ? (regime == 1 ? color.green : color.red) : color.yellow, text_size=size.small)
+    table.cell(dashboard, 2, 12, "ADX:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 12, str.tostring(adxValue, "#.#"), text_color=adxValue > 25 ? color.green : color.gray, text_size=size.small)
+    
+    table.cell(dashboard, 0, 13, "Cycle:", text_color=color.white, text_size=size.small)
+    cycleColor = cyclePhase == 1 ? color.teal : cyclePhase == 2 ? color.green : cyclePhase == 3 ? color.orange : color.red
+    table.cell(dashboard, 1, 13, cyclePhaseStr, text_color=cycleColor, text_size=size.small)
+    table.cell(dashboard, 2, 13, "Day:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 13, str.tostring(cycleDay), text_color=color.white, text_size=size.small)
+    
+    table.cell(dashboard, 0, 14, "SPX Corr:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 14, str.tostring(nz(corrSPX, 0), "#.##"), text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 2, 14, "VIX:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 3, 14, str.tostring(vixLevel, "#.#"), text_color=vixLevel > 25 ? color.red : color.green, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 15, "Breadth:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 15, str.tostring(marketBreadth) + "/3", text_color=marketBreadth >= 2 ? color.green : color.red, text_size=size.tiny)
+    table.cell(dashboard, 2, 15, "Risk-Off:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 3, 15, riskOffSignal ? "YES" : "NO", text_color=riskOffSignal ? color.red : color.green, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 16, "═══ RISK MANAGEMENT ═══", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dashboard, 0, 16, 3, 16)
+    
+    table.cell(dashboard, 0, 17, "Position:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 17, str.tostring(finalPosition, "#.#") + "%", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 2, 17, "Drawdown:", text_color=color.white, text_size=size.small)
+    ddColor = currentDrawdown > 10 ? color.red : currentDrawdown > 5 ? color.orange : color.green
+    table.cell(dashboard, 3, 17, str.tostring(currentDrawdown, "#.#") + "%", text_color=ddColor, text_size=size.small)
+    
+    table.cell(dashboard, 0, 18, "Kelly %:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 1, 18, str.tostring(kellyPosition, "#.#") + "%", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 2, 18, "ATR:", text_color=color.silver, text_size=size.tiny)
+    table.cell(dashboard, 3, 18, str.tostring(atrValue, "#.##"), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 19, "═══ FILTER STATUS ═══", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dashboard, 0, 19, 3, 19)
+    
+    table.cell(dashboard, 0, 20, "IC Filter:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 20, icFilterPassed ? "PASS" : "BLOCK", text_color=icFilterPassed ? color.green : color.red, text_size=size.tiny)
+    table.cell(dashboard, 2, 20, "Liq Filter:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 20, liquidationFilter ? "PASS" : "BLOCK", text_color=liquidationFilter ? color.green : color.red, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 21, "Weekend:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 1, 21, weekendProtectionActive ? "ACTIVE" : "OFF", text_color=weekendProtectionActive ? color.yellow : color.green, text_size=size.tiny)
+    table.cell(dashboard, 2, 21, "All Pass:", text_color=color.white, text_size=size.tiny)
+    table.cell(dashboard, 3, 21, allFiltersPass ? "YES" : "NO", text_color=allFiltersPass ? color.green : color.red, text_size=size.tiny)
+    
+    table.cell(dashboard, 0, 22, "═══ PERFORMANCE ═══", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.merge_cells(dashboard, 0, 22, 3, 22)
+    
+    table.cell(dashboard, 0, 23, "Win Rate:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 23, str.tostring(sim_winrate * 100, "#.#") + "%", text_color=sim_winrate > 0.5 ? color.green : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 23, "Profit Factor:", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 23, str.tostring(sim_pf, "#.##"), text_color=sim_pf > 1 ? color.green : color.red, text_size=size.small)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 11: ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(longCondition, "Long Entry Signal", "BTC Strategy: LONG Entry")
+alertcondition(shortCondition, "Short Entry Signal", "BTC Strategy: SHORT Entry")
+alertcondition(exitLongCondition, "Exit Long Signal", "BTC Strategy: EXIT LONG")
+alertcondition(exitShortCondition, "Exit Short Signal", "BTC Strategy: EXIT SHORT")
+alertcondition(oiFlipBullish, "OI Flip Bullish", "BTC: OI Flip BULLISH")
+alertcondition(oiFlipBearish, "OI Flip Bearish", "BTC: OI Flip BEARISH")
+alertcondition(weekendProtectionActive and not weekendProtectionActive[1], "Weekend Protection", "BTC: Weekend Protection ACTIVATED")
+alertcondition(maxDrawdownBreached, "Max Drawdown", "BTC ALERT: Max Drawdown Breached")
+alertcondition(riskOffSignal and not riskOffSignal[1], "Risk-Off Signal", "BTC: Risk-Off Detected")
+alertcondition(liquidationWarning and not liquidationWarning[1], "Liquidation Cascade", "BTC Strategy: Liquidation Cascade Detected!")
+alertcondition(icEMA < i_icMinThreshold and icEMA[1] >= i_icMinThreshold, "IC Degraded", "BTC Strategy: IC Degraded - Signal Quality Poor")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END OF INDICATOR
+// ══════════════════════════════════════════════════════════════════════════════
